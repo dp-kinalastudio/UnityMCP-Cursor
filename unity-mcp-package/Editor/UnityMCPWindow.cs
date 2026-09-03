@@ -23,6 +23,26 @@ namespace UnityMCP.Editor
                 GUILayout.Label("UnityMCP Debug", EditorStyles.boldLabel);
                 EditorGUILayout.Space(5);
 
+                bool autoConnect = EditorGUILayout.ToggleLeft(
+                    "Enable automatic connection",
+                    UnityMCPConnection.AutoConnectEnabled);
+                if (autoConnect != UnityMCPConnection.AutoConnectEnabled)
+                {
+                    UnityMCPConnection.AutoConnectEnabled = autoConnect;
+                }
+
+                EditorGUILayout.Space(5);
+
+                int serverPort = EditorGUILayout.DelayedIntField(
+                    new GUIContent("Server Port", "Use a different port for each concurrently running Unity project."),
+                    UnityMCPConnection.ServerPort);
+                if (serverPort != UnityMCPConnection.ServerPort)
+                {
+                    UnityMCPConnection.ServerPort = serverPort;
+                }
+
+                EditorGUILayout.Space(5);
+
                 // Connection status with background
                 EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
                 EditorGUILayout.LabelField("Connection Status:", GUILayout.Width(120));
@@ -42,7 +62,7 @@ namespace UnityMCP.Editor
                 EditorGUILayout.Space(10);
 
                 // Retry button - make it more prominent and disable when connected
-                GUI.enabled = !UnityMCPConnection.IsConnected;
+                GUI.enabled = UnityMCPConnection.AutoConnectEnabled && !UnityMCPConnection.IsConnected;
                 if (GUILayout.Button("Retry Connection", GUILayout.Height(30)))
                 {
                     UnityMCPConnection.RetryConnection();

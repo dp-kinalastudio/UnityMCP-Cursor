@@ -173,7 +173,10 @@ npm run inspector
 
 ### Communication Protocol
 
-- WebSocket-based communication on port 8080
+- WebSocket-based communication on port 8080 by default. Run concurrent project sessions with
+  `node build/index.js --port 8081` (or set `UNITY_MCP_PORT=8081`) and choose the same project-scoped
+  port in Unity under **UnityMCP > Debug Window**. Each server process and Unity project must use its
+  own port.
 - Bidirectional real-time updates
 - JSON message format for all communications
 - Automatic reconnection handling

@@ -18,16 +18,86 @@ namespace UnityMCP.Editor
     {
         private static ClientWebSocket webSocket;
         private static bool isConnected = false;
-        private static readonly Uri serverUri = new Uri("ws://localhost:8080");
+        private static readonly string projectPreferencePrefix = $"UnityMCP.{PlayerSettings.productGUID}.";
+        private static readonly string autoConnectEditorPref = projectPreferencePrefix + "AutoConnectEnabled";
+        private static readonly string serverPortEditorPref = projectPreferencePrefix + "ServerPort";
+        private static int serverPort = EditorPrefs.GetInt(serverPortEditorPref, 8080);
+        private static Uri serverUri = BuildServerUri(serverPort);
+        private static bool autoConnectEnabled = EditorPrefs.GetBool(autoConnectEditorPref, true);
         private static string lastErrorMessage = "";
+        private static bool connectionAttemptInProgress;
+        private static int consecutiveConnectionFailures;
+        private static bool outageReported;
+        private static bool intentionalDisconnect;
+        private static double nextReconnectAt;
+        private const double initialReconnectDelaySeconds = 5.0;
+        private const double maxReconnectDelaySeconds = 300.0;
         private static readonly Queue<LogEntry> logBuffer = new Queue<LogEntry>();
         private static readonly int maxLogBufferSize = 1000;
         private static bool isLoggingEnabled = true;
+        private const int editorStateIntervalMs = 5000;
+        private const double sceneStateRefreshInterval = 30.0;
+        private const double projectStructureRefreshInterval = 120.0;
+        private static double nextSceneStateRefresh;
+        private static double nextProjectStructureRefresh;
+        private static List<string> cachedActiveGameObjects = new List<string>();
+        private static object cachedSceneHierarchy = new List<object>();
+        private static object cachedProjectStructure = new
+        {
+            scenes = new string[0],
+            prefabs = new string[0],
+            scripts = new string[0]
+        };
     
         // Public properties for the debug window
         public static bool IsConnected => isConnected;
         public static Uri ServerUri => serverUri;
+        public static int ServerPort
+        {
+            get => serverPort;
+            set
+            {
+                int validPort = Mathf.Clamp(value, 1, 65535);
+                if (serverPort == validPort)
+                {
+                    return;
+                }
+
+                serverPort = validPort;
+                serverUri = BuildServerUri(serverPort);
+                EditorPrefs.SetInt(serverPortEditorPref, serverPort);
+
+                Disconnect();
+                nextReconnectAt = EditorApplication.timeSinceStartup;
+            }
+        }
         public static string LastErrorMessage => lastErrorMessage;
+        public static bool AutoConnectEnabled
+        {
+            get => autoConnectEnabled;
+            set
+            {
+                if (autoConnectEnabled == value)
+                {
+                    return;
+                }
+
+                autoConnectEnabled = value;
+                EditorPrefs.SetBool(autoConnectEditorPref, value);
+
+                if (value)
+                {
+                    consecutiveConnectionFailures = 0;
+                    outageReported = false;
+                    nextReconnectAt = 0;
+                    ConnectToServer();
+                }
+                else
+                {
+                    Disconnect("[UnityMCP] Automatic connection disabled.");
+                }
+            }
+        }
         public static bool IsLoggingEnabled
         {
             get => isLoggingEnabled;
@@ -57,6 +127,9 @@ namespace UnityMCP.Editor
         public static void RetryConnection()
         {
             Debug.Log("[UnityMCP] Manually retrying connection...");
+            consecutiveConnectionFailures = 0;
+            outageReported = false;
+            nextReconnectAt = 0;
             ConnectToServer();
         }
         private static readonly CancellationTokenSource cts = new CancellationTokenSource();
@@ -71,8 +144,11 @@ namespace UnityMCP.Editor
             Debug.Log("[UnityMCP] Plugin initialized");
             EditorApplication.delayCall += () =>
             {
-                Debug.Log("[UnityMCP] Starting initial connection");
-                ConnectToServer();
+                //Debug.Log("[UnityMCP] Starting initial connection");
+                if (autoConnectEnabled)
+                {
+                    ConnectToServer();
+                }
             };
             EditorApplication.update += Update;
         }
@@ -145,20 +221,29 @@ namespace UnityMCP.Editor
 
         private static async void ConnectToServer()
         {
+            if (!autoConnectEnabled)
+            {
+                return;
+            }
+
+            if (connectionAttemptInProgress)
+            {
+                return;
+            }
+
             if (webSocket != null &&
                 (webSocket.State == WebSocketState.Connecting ||
                  webSocket.State == WebSocketState.Open))
             {
-                Debug.Log("[UnityMCP] Already connected or connecting");
+               // Debug.Log("[UnityMCP] Already connected or connecting");
                 return;
             }
 
+            connectionAttemptInProgress = true;
+
             try
             {
-                Debug.Log($"[UnityMCP] Attempting to connect to MCP Server at {serverUri}");
-                Debug.Log($"[UnityMCP] Current Unity version: {Application.unityVersion}");
-                Debug.Log($"[UnityMCP] Current platform: {Application.platform}");
-                
+                webSocket?.Dispose();
                 webSocket = new ClientWebSocket();
                 webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(30);
                 
@@ -166,59 +251,133 @@ namespace UnityMCP.Editor
                 using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, timeout.Token);
                 
                 await webSocket.ConnectAsync(serverUri, linkedCts.Token);
+
+                if (!autoConnectEnabled)
+                {
+                    return;
+                }
+
                 isConnected = true;
                 lastErrorMessage = "";
-                Debug.Log("[UnityMCP] Successfully connected to MCP Server");
-                StartReceiving();
-                StartSendingEditorState();
+                consecutiveConnectionFailures = 0;
+                nextReconnectAt = 0;
+
+                if (outageReported)
+                {
+                    Debug.Log("[UnityMCP] MCP Server connection restored.");
+                }
+
+                outageReported = false;
+                StartReceiving(webSocket);
+                StartSendingEditorState(webSocket);
             }
             catch (OperationCanceledException)
             {
-                lastErrorMessage = "[UnityMCP] Connection attempt timed out";
-                Debug.LogError(lastErrorMessage);
-                isConnected = false;
+                RecordConnectionFailure("Connection attempt timed out.");
             }
             catch (WebSocketException we)
             {
-                lastErrorMessage = $"[UnityMCP] WebSocket error: {we.Message}\nDetails: {we.InnerException?.Message}";
-                Debug.LogError(lastErrorMessage);
-                Debug.LogError($"[UnityMCP] Stack trace: {we.StackTrace}");
-                isConnected = false;
+                string detail = we.InnerException?.Message;
+                RecordConnectionFailure(string.IsNullOrEmpty(detail)
+                    ? we.Message
+                    : $"{we.Message} ({detail})");
             }
             catch (Exception e)
             {
-                lastErrorMessage = $"[UnityMCP] Failed to connect to MCP Server: {e.Message}\nType: {e.GetType().Name}";
-                Debug.LogError(lastErrorMessage);
-                Debug.LogError($"[UnityMCP] Stack trace: {e.StackTrace}");
-                isConnected = false;
+                RecordConnectionFailure($"{e.GetType().Name}: {e.Message}");
             }
-        }
-
-        private static float reconnectTimer = 0f;
-        private static readonly float reconnectInterval = 5f;
-
-        private static void Update()
-        {
-            if (!isConnected && webSocket?.State != WebSocketState.Open)
+            finally
             {
-                reconnectTimer += Time.deltaTime;
-                if (reconnectTimer >= reconnectInterval)
+                connectionAttemptInProgress = false;
+
+                if (!isConnected)
                 {
-                    Debug.Log("[UnityMCP] Attempting to reconnect...");
-                    ConnectToServer();
-                    reconnectTimer = 0f;
+                    webSocket?.Dispose();
+                    webSocket = null;
                 }
             }
         }
 
-        private static async void StartReceiving()
+        private static Uri BuildServerUri(int port) => new Uri($"ws://localhost:{port}");
+
+        private static void RecordConnectionFailure(string reason)
+        {
+            isConnected = false;
+
+            if (!autoConnectEnabled || intentionalDisconnect)
+            {
+                lastErrorMessage = "";
+                return;
+            }
+
+            lastErrorMessage = $"[UnityMCP] Cannot connect to MCP Server at {serverUri}: {reason}";
+            consecutiveConnectionFailures++;
+
+            double delay = Math.Min(
+                initialReconnectDelaySeconds * Math.Pow(2, consecutiveConnectionFailures - 1),
+                maxReconnectDelaySeconds);
+            nextReconnectAt = EditorApplication.timeSinceStartup + delay;
+
+            // One warning explains the outage. Subsequent retries are intentionally silent; the
+            // successful reconnect is logged when the server comes back.
+            if (!outageReported)
+            {
+                Debug.LogWarning($"{lastErrorMessage} Retrying silently in the background.");
+                outageReported = true;
+            }
+        }
+
+        private static void Update()
+        {
+            if (autoConnectEnabled && !isConnected && !connectionAttemptInProgress
+                && EditorApplication.timeSinceStartup >= nextReconnectAt)
+            {
+                ConnectToServer();
+            }
+        }
+
+        private static void Disconnect(string message = null)
+        {
+            intentionalDisconnect = true;
+            isConnected = false;
+            consecutiveConnectionFailures = 0;
+            outageReported = false;
+            nextReconnectAt = double.PositiveInfinity;
+            lastErrorMessage = "";
+
+            if (webSocket != null)
+            {
+                try
+                {
+                    webSocket.Abort();
+                    webSocket.Dispose();
+                }
+                catch (Exception)
+                {
+                    // The socket may already be tearing down on its receive task.
+                }
+                finally
+                {
+                    webSocket = null;
+                }
+            }
+
+            intentionalDisconnect = false;
+
+            if (!string.IsNullOrEmpty(message))
+            {
+                Debug.Log(message);
+            }
+        }
+
+        private static async void StartReceiving(ClientWebSocket socket)
         {
             var buffer = new byte[1024 * 4];
             try
             {
-                while (webSocket.State == WebSocketState.Open)
+                while (socket.State == WebSocketState.Open)
                 {
-                    var result = await webSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
+                    var result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), cts.Token);
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
                         var message = Encoding.UTF8.GetString(buffer, 0, result.Count);
@@ -228,8 +387,14 @@ namespace UnityMCP.Editor
             }
             catch (Exception e)
             {
-                Debug.LogError($"Error receiving message: {e.Message}");
-                isConnected = false;
+                if (autoConnectEnabled && ReferenceEquals(webSocket, socket))
+                {
+                    Debug.LogError($"Error receiving message: {e.Message}");
+                }
+                if (ReferenceEquals(webSocket, socket))
+                {
+                    isConnected = false;
+                }
             }
         }
 
@@ -257,7 +422,7 @@ namespace UnityMCP.Editor
             }
         }
 
-        private static void ExecuteEditorCommand(string commandData)
+        private static async void ExecuteEditorCommand(string commandData)
         {
             var logs = new List<string>();
             var errors = new List<string>();
@@ -292,7 +457,7 @@ try
                         }
                     });
                     var buffer = Encoding.UTF8.GetBytes(resultMessage);
-                    webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token).Wait();
+                    await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
                 }
                 catch (Exception e)
                 {
@@ -324,7 +489,7 @@ try
                     }
                 });
                 var buffer = Encoding.UTF8.GetBytes(errorMessage);
-                webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token).Wait();
+                await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
             }
             finally
             {
@@ -372,9 +537,9 @@ try
             EditorApplication.isPlaying = !EditorApplication.isPlaying;
         }
 
-        private static async void StartSendingEditorState()
+        private static async void StartSendingEditorState(ClientWebSocket socket)
         {
-            while (isConnected && webSocket.State == WebSocketState.Open)
+            while (isConnected && socket.State == WebSocketState.Open)
             {
                 try
                 {
@@ -385,13 +550,19 @@ try
                         data = state
                     });
                     var buffer = Encoding.UTF8.GetBytes(message);
-                    await webSocket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
-                    await Task.Delay(1000); // Update every second
+                    await socket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, cts.Token);
+                    await Task.Delay(editorStateIntervalMs);
                 }
                 catch (Exception e)
                 {
-                    Debug.LogError($"Error sending editor state: {e.Message}");
-                    isConnected = false;
+                    if (autoConnectEnabled && ReferenceEquals(webSocket, socket))
+                    {
+                        Debug.LogError($"Error sending editor state: {e.Message}");
+                    }
+                    if (ReferenceEquals(webSocket, socket))
+                    {
+                        isConnected = false;
+                    }
                     break;
                 }
             }
@@ -401,21 +572,7 @@ try
         {
             try
             {
-                var activeGameObjects = new List<string>();
                 var selectedObjects = new List<string>();
-
-                // Use FindObjectsByType instead of FindObjectsOfType
-                var foundObjects = GameObject.FindObjectsByType<GameObject>(FindObjectsSortMode.None);
-                if (foundObjects != null)
-                {
-                    foreach (var obj in foundObjects)
-                    {
-                        if (obj != null && !string.IsNullOrEmpty(obj.name))
-                        {
-                            activeGameObjects.Add(obj.name);
-                        }
-                    }
-                }
 
                 var selection = Selection.gameObjects;
                 if (selection != null)
@@ -429,23 +586,16 @@ try
                     }
                 }
 
-                var currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
-                var sceneHierarchy = currentScene.IsValid() ? GetSceneHierarchy() : new List<object>();
-                
-                var projectStructure = new
-                {
-                    scenes = GetSceneNames() ?? new string[0],
-                    prefabs = GetPrefabPaths() ?? new string[0],
-                    scripts = GetScriptPaths() ?? new string[0]
-                };
+                RefreshSceneStateCacheIfNeeded();
+                RefreshProjectStructureCacheIfNeeded();
 
                 return new
                 {
-                    activeGameObjects,
+                    activeGameObjects = cachedActiveGameObjects,
                     selectedObjects,
                     playModeState = EditorApplication.isPlaying ? "Playing" : "Stopped",
-                    sceneHierarchy,
-                    projectStructure
+                    sceneHierarchy = cachedSceneHierarchy,
+                    projectStructure = cachedProjectStructure
                 };
             }
             catch (Exception e)
@@ -461,6 +611,43 @@ try
                     projectStructure = new { scenes = new string[0], prefabs = new string[0], scripts = new string[0] }
                 };
             }
+        }
+
+        private static void RefreshSceneStateCacheIfNeeded()
+        {
+            if (EditorApplication.timeSinceStartup < nextSceneStateRefresh) return;
+
+            nextSceneStateRefresh = EditorApplication.timeSinceStartup + sceneStateRefreshInterval;
+            var activeGameObjects = new List<string>();
+
+            var foundObjects = GameObject.FindObjectsByType<GameObject>(FindObjectsSortMode.None);
+            if (foundObjects != null)
+            {
+                foreach (var obj in foundObjects)
+                {
+                    if (obj != null && !string.IsNullOrEmpty(obj.name))
+                    {
+                        activeGameObjects.Add(obj.name);
+                    }
+                }
+            }
+
+            var currentScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            cachedActiveGameObjects = activeGameObjects;
+            cachedSceneHierarchy = currentScene.IsValid() ? GetSceneHierarchy() : new List<object>();
+        }
+
+        private static void RefreshProjectStructureCacheIfNeeded()
+        {
+            if (EditorApplication.timeSinceStartup < nextProjectStructureRefresh) return;
+
+            nextProjectStructureRefresh = EditorApplication.timeSinceStartup + projectStructureRefreshInterval;
+            cachedProjectStructure = new
+            {
+                scenes = GetSceneNames() ?? new string[0],
+                prefabs = GetPrefabPaths() ?? new string[0],
+                scripts = GetScriptPaths() ?? new string[0]
+            };
         }
 
         private static object GetSceneHierarchy()

@@ -26,10 +26,27 @@ interface LogEntry {
   timestamp: string;
 }
 
+function resolveWebSocketPort(): number {
+  const inlineArgument = process.argv.find(argument => argument.startsWith('--port='));
+  const portArgumentIndex = process.argv.indexOf('--port');
+  const rawPort = inlineArgument?.substring('--port='.length)
+    ?? (portArgumentIndex >= 0 ? process.argv[portArgumentIndex + 1] : undefined)
+    ?? process.env.UNITY_MCP_PORT
+    ?? '8080';
+  const port = Number(rawPort);
+
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid Unity MCP WebSocket port '${rawPort}'. Expected an integer from 1 to 65535.`);
+  }
+
+  return port;
+}
+
 class UnityMCPServer {
   private server: Server;
   private wsServer: WebSocketServer;
   private unityConnection: WebSocket | null = null;
+  private readonly webSocketPort: number;
   private editorState: UnityEditorState = {
     activeGameObjects: [],
     selectedObjects: [],
@@ -49,6 +66,7 @@ class UnityMCPServer {
   private commandStartTime: number | null = null;
 
   constructor() {
+    this.webSocketPort = resolveWebSocketPort();
     // Initialize MCP Server
     this.server = new Server(
       {
@@ -63,7 +81,7 @@ class UnityMCPServer {
     );
 
     // Initialize WebSocket Server for Unity communication
-    this.wsServer = new WebSocketServer({ port: 8080 });
+    this.wsServer = new WebSocketServer({ port: this.webSocketPort });
     this.setupWebSocket();
     this.setupTools();
 
@@ -76,7 +94,7 @@ class UnityMCPServer {
   }
 
   private setupWebSocket() {
-    console.error('[Unity MCP] WebSocket server starting on port 8080');
+    console.error(`[Unity MCP] WebSocket server starting on port ${this.webSocketPort}`);
     
     this.wsServer.on('listening', () => {
       console.error('[Unity MCP] WebSocket server is listening for connections');
