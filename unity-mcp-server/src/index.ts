@@ -42,11 +42,21 @@ function resolveWebSocketPort(): number {
   return port;
 }
 
+function resolveSessionNameOverride(): string | undefined {
+  const inlineArgument = process.argv.find(argument => argument.startsWith('--session='));
+  const argumentIndex = process.argv.indexOf('--session');
+  return inlineArgument?.substring('--session='.length)
+    ?? (argumentIndex >= 0 ? process.argv[argumentIndex + 1] : undefined)
+    ?? process.env.UNITY_MCP_SESSION;
+}
+
 class UnityMCPServer {
   private server: Server;
   private wsServer: WebSocketServer;
   private unityConnection: WebSocket | null = null;
   private readonly webSocketPort: number;
+  private readonly sessionNameOverride?: string;
+  private mcpClientName?: string;
   private editorState: UnityEditorState = {
     activeGameObjects: [],
     selectedObjects: [],
@@ -67,6 +77,7 @@ class UnityMCPServer {
 
   constructor() {
     this.webSocketPort = resolveWebSocketPort();
+    this.sessionNameOverride = resolveSessionNameOverride();
     // Initialize MCP Server
     this.server = new Server(
       {
@@ -84,6 +95,13 @@ class UnityMCPServer {
     this.wsServer = new WebSocketServer({ port: this.webSocketPort });
     this.setupWebSocket();
     this.setupTools();
+
+    // MCP clients identify themselves in the standard initialize handshake. This catches Claude
+    // Code, Codex, and other compliant clients without requiring a custom command-line label.
+    this.server.oninitialized = () => {
+      this.mcpClientName = this.server.getClientVersion()?.name;
+      this.sendServerInfo();
+    };
 
     // Error handling
     this.server.onerror = (error) => console.error('[MCP Error]', error);
@@ -105,8 +123,9 @@ class UnityMCPServer {
     });
 
     this.wsServer.on('connection', (ws: WebSocket) => {
-      console.error('[Unity MCP] Unity Editor connected');
+      console.error(`[Unity MCP] Unity Editor connected to '${this.displaySessionName}'`);
       this.unityConnection = ws;
+      this.sendServerInfo();
 
       ws.on('message', (data: Buffer) => {
         try {
@@ -127,6 +146,29 @@ class UnityMCPServer {
         this.unityConnection = null;
       });
     });
+  }
+
+  private get displaySessionName(): string {
+    return this.sessionNameOverride
+      ?? this.mcpClientName
+      ?? `Unknown MCP client :${this.webSocketPort}`;
+  }
+
+  private sendServerInfo() {
+    if (!this.unityConnection || this.unityConnection.readyState !== WebSocket.OPEN) {
+      return;
+    }
+
+    this.unityConnection.send(JSON.stringify({
+      type: 'serverInfo',
+      data: {
+        sessionName: this.displaySessionName,
+        clientName: this.mcpClientName ?? '',
+        customLabel: this.sessionNameOverride ?? '',
+        port: this.webSocketPort,
+        processId: process.pid
+      }
+    }));
   }
 
   private handleUnityMessage(message: any) {

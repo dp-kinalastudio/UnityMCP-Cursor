@@ -53,6 +53,20 @@ namespace UnityMCP.Editor
 
                 EditorGUILayout.Space(5);
 
+                EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
+                EditorGUILayout.LabelField("MCP Session:", GUILayout.Width(120));
+                string sessionIdentity = UnityMCPConnection.IsConnected
+                    ? UnityMCPConnection.ConnectedSessionName
+                    : "—";
+                if (UnityMCPConnection.IsConnected && UnityMCPConnection.ConnectedServerProcessId > 0)
+                {
+                    sessionIdentity += $"  (PID {UnityMCPConnection.ConnectedServerProcessId})";
+                }
+                EditorGUILayout.SelectableLabel(sessionIdentity, EditorStyles.textField, GUILayout.Height(20));
+                EditorGUILayout.EndHorizontal();
+
+                EditorGUILayout.Space(5);
+
                 // Server URI with background
                 EditorGUILayout.BeginHorizontal(EditorStyles.helpBox);
                 EditorGUILayout.LabelField("Server URI:", GUILayout.Width(120));

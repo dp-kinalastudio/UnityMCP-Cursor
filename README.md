@@ -177,6 +177,10 @@ npm run inspector
   `node build/index.js --port 8081` (or set `UNITY_MCP_PORT=8081`) and choose the same project-scoped
   port in Unity under **UnityMCP > Debug Window**. Each server process and Unity project must use its
   own port.
+
+Give each process a visible identity with `--session "Claude - Arctic Build"` or the
+`UNITY_MCP_SESSION` environment variable. Unity displays that label, the port, and the server PID in
+**UnityMCP > Debug Window**, making it clear which CLI or desktop session owns the connection.
 - Bidirectional real-time updates
 - JSON message format for all communications
 - Automatic reconnection handling

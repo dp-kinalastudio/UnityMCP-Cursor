@@ -25,6 +25,8 @@ namespace UnityMCP.Editor
         private static Uri serverUri = BuildServerUri(serverPort);
         private static bool autoConnectEnabled = EditorPrefs.GetBool(autoConnectEditorPref, true);
         private static string lastErrorMessage = "";
+        private static string connectedSessionName = "";
+        private static int connectedServerProcessId;
         private static bool connectionAttemptInProgress;
         private static int consecutiveConnectionFailures;
         private static bool outageReported;
@@ -72,6 +74,8 @@ namespace UnityMCP.Editor
             }
         }
         public static string LastErrorMessage => lastErrorMessage;
+        public static string ConnectedSessionName => connectedSessionName;
+        public static int ConnectedServerProcessId => connectedServerProcessId;
         public static bool AutoConnectEnabled
         {
             get => autoConnectEnabled;
@@ -259,6 +263,8 @@ namespace UnityMCP.Editor
 
                 isConnected = true;
                 lastErrorMessage = "";
+                connectedSessionName = "Awaiting server identity…";
+                connectedServerProcessId = 0;
                 consecutiveConnectionFailures = 0;
                 nextReconnectAt = 0;
 
@@ -344,6 +350,8 @@ namespace UnityMCP.Editor
             outageReported = false;
             nextReconnectAt = double.PositiveInfinity;
             lastErrorMessage = "";
+            connectedSessionName = "";
+            connectedServerProcessId = 0;
 
             if (webSocket != null)
             {
@@ -413,6 +421,11 @@ namespace UnityMCP.Editor
                         break;
                     case "executeEditorCommand":
                         ExecuteEditorCommand(data["data"].ToString());
+                        break;
+                    case "serverInfo":
+                        var serverInfo = JsonConvert.DeserializeObject<ServerInfoData>(data["data"].ToString());
+                        connectedSessionName = serverInfo?.sessionName ?? "Unnamed MCP session";
+                        connectedServerProcessId = serverInfo?.processId ?? 0;
                         break;
                 }
             }
@@ -517,6 +530,13 @@ try
         private class EditorCommandData
         {
             public string code { get; set; }
+        }
+
+        private class ServerInfoData
+        {
+            public string sessionName { get; set; }
+            public int port { get; set; }
+            public int processId { get; set; }
         }
 
         private static void SelectGameObject(string objectPath)
