@@ -209,6 +209,23 @@ The system provides comprehensive error handling for:
 4. Push to the branch (`git push origin feature/amazing-feature`)
 5. Open a Pull Request
 
+## Project-specific editor ports
+
+The Editor reads `project-ports.json` at this repository's root on domain load
+and when **Reload Port Configuration** or **Retry Connection** is clicked.
+The JSON object maps absolute Unity project roots (the folder containing Assets)
+to unique ports. Look uses 8080, Dev 8090, Review 8095, and Codex 8096.
+
+Paths are normalized and matched exactly, case-insensitively on Windows.
+Copied projects sharing a Unity product GUID therefore no longer share a port.
+Missing mappings, malformed configuration, duplicate roots/ports and invalid
+ports stop connection attempts and show the problem in the Debug Window.
+The configured port is read-only there; edit the JSON to change it.
+
+The MCP server must still be launched on the matching port in the client's
+configuration (`.codex/config.toml` for Codex). This file configures the Unity
+client; it does not start a server. Add a mapping before using another checkout.
+
 ## License
 
 This project is licensed under the MIT license.

@@ -10,6 +10,8 @@ using System.Linq;
 using Newtonsoft.Json;
 using Microsoft.CSharp;
 using System.CodeDom.Compiler;
+using System.IO;
+using System.Runtime.CompilerServices;
 
 namespace UnityMCP.Editor
 {
@@ -18,7 +20,7 @@ namespace UnityMCP.Editor
     {
         private static ClientWebSocket webSocket;
         private static bool isConnected = false;
-        private static readonly string projectPreferencePrefix = $"UnityMCP.{PlayerSettings.productGUID}.";
+        private static readonly string projectPreferencePrefix = $"UnityMCP.{Path.GetFullPath(Path.Combine(Application.dataPath, "..")).Replace('\\', '/').ToLowerInvariant()}.";
         private static readonly string autoConnectEditorPref = projectPreferencePrefix + "AutoConnectEnabled";
         private static readonly string serverPortEditorPref = projectPreferencePrefix + "ServerPort";
         private static int serverPort = EditorPrefs.GetInt(serverPortEditorPref, 8080);
@@ -54,11 +56,66 @@ namespace UnityMCP.Editor
         // Public properties for the debug window
         public static bool IsConnected => isConnected;
         public static Uri ServerUri => serverUri;
+        public static string PortConfigPath => ConfigPath();
+        public static bool PortIsConfigured { get; private set; }
+        private static string portConfigError;
+
+        static string ConfigPath([CallerFilePath] string source = "") =>
+            Path.GetFullPath(Path.Combine(Path.GetDirectoryName(source), "..", "..", "project-ports.json"));
+
+        // Exact normalized roots: a sibling repository must never inherit another editor's port.
+        internal static int? PortForProject(string json, string projectRoot)
+        {
+            var entries = JsonConvert.DeserializeObject<Dictionary<string, int>>(json)
+                ?? throw new FormatException("Expected a project-root to port object.");
+            var normalized = new Dictionary<string, int>(
+                Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (var entry in entries)
+            {
+                if (!Path.IsPathRooted(entry.Key) || entry.Value < 1 || entry.Value > 65535)
+                    throw new FormatException("Each entry needs an absolute project root and a port from 1 to 65535.");
+                string root = Path.GetFullPath(entry.Key).TrimEnd('/', '\\');
+                if (normalized.ContainsKey(root) || normalized.ContainsValue(entry.Value))
+                    throw new FormatException("Project roots and ports must be unique.");
+                normalized.Add(root, entry.Value);
+            }
+            return normalized.TryGetValue(Path.GetFullPath(projectRoot).TrimEnd('/', '\\'), out int port)
+                ? (int?)port : null;
+        }
+
+        public static void ReloadPortConfiguration()
+        {
+            try
+            {
+                int? configured = File.Exists(PortConfigPath)
+                    ? PortForProject(File.ReadAllText(PortConfigPath), Path.Combine(Application.dataPath, ".."))
+                    : null;
+                if (!configured.HasValue)
+                    throw new FormatException("No mapping for this project. Add its root and port to " + PortConfigPath);
+                portConfigError = null;
+                PortIsConfigured = true;
+                if (serverPort != configured.Value)
+                {
+                    Disconnect();
+                    serverPort = configured.Value;
+                    serverUri = BuildServerUri(serverPort);
+                }
+                nextReconnectAt = 0;
+            }
+            catch (Exception exception)
+            {
+                PortIsConfigured = false;
+                Disconnect();
+                portConfigError = "Port configuration: " + exception.Message;
+                Debug.LogWarning("[UnityMCP] " + portConfigError);
+            }
+        }
         public static int ServerPort
         {
             get => serverPort;
             set
             {
+                if (PortIsConfigured) return;
                 int validPort = Mathf.Clamp(value, 1, 65535);
                 if (serverPort == validPort)
                 {
@@ -73,7 +130,7 @@ namespace UnityMCP.Editor
                 nextReconnectAt = EditorApplication.timeSinceStartup;
             }
         }
-        public static string LastErrorMessage => lastErrorMessage;
+        public static string LastErrorMessage => portConfigError ?? lastErrorMessage;
         public static string ConnectedSessionName => connectedSessionName;
         public static int ConnectedServerProcessId => connectedServerProcessId;
         public static bool AutoConnectEnabled
@@ -130,6 +187,7 @@ namespace UnityMCP.Editor
         // Public method to manually retry connection
         public static void RetryConnection()
         {
+            ReloadPortConfiguration();
             Debug.Log("[UnityMCP] Manually retrying connection...");
             consecutiveConnectionFailures = 0;
             outageReported = false;
@@ -146,6 +204,7 @@ namespace UnityMCP.Editor
             isLoggingEnabled = true;
 
             Debug.Log("[UnityMCP] Plugin initialized");
+            ReloadPortConfiguration();
             EditorApplication.delayCall += () =>
             {
                 //Debug.Log("[UnityMCP] Starting initial connection");
@@ -225,7 +284,7 @@ namespace UnityMCP.Editor
 
         private static async void ConnectToServer()
         {
-            if (!autoConnectEnabled)
+            if (!autoConnectEnabled || portConfigError != null)
             {
                 return;
             }

@@ -33,6 +33,8 @@ namespace UnityMCP.Editor
 
                 EditorGUILayout.Space(5);
 
+                EditorGUILayout.LabelField("Port configuration", UnityMCPConnection.PortConfigPath);
+                EditorGUI.BeginDisabledGroup(UnityMCPConnection.PortIsConfigured);
                 int serverPort = EditorGUILayout.DelayedIntField(
                     new GUIContent("Server Port", "Use a different port for each concurrently running Unity project."),
                     UnityMCPConnection.ServerPort);
@@ -40,6 +42,9 @@ namespace UnityMCP.Editor
                 {
                     UnityMCPConnection.ServerPort = serverPort;
                 }
+                EditorGUI.EndDisabledGroup();
+                if (GUILayout.Button("Reload Port Configuration"))
+                    UnityMCPConnection.RetryConnection();
 
                 EditorGUILayout.Space(5);
 
